@@ -29,20 +29,59 @@ import {
   Camera,
   FileText,
   File,
+  Volume2,
+  VolumeX,
+  Menu,
+  MessageSquare,
+  Settings,
 } from "lucide-react";
 import { Message, AspectRatio, ImageStyle, Attachment } from "./types";
 import { ASPECT_RATIOS, STYLE_OPTIONS, TEXT_SUGGESTIONS, IMAGE_SUGGESTIONS } from "./data";
+import { PromptForm } from "./components/PromptForm";
+
+function cleanTextProse(text: string): string {
+  if (!text) return text;
+  
+  // Remove markdown bolding and italics asterisks
+  let processed = text.replace(/\*\*/g, "").replace(/\*/g, "");
+  
+  // Split lines to clean up list items and markdown headers
+  const lines = processed.split("\n");
+  const cleanedLines = lines.map(line => {
+    let cleaned = line;
+    // Replace markdown headers (e.g. ### Header) with plain text
+    cleaned = cleaned.replace(/^\s*#+\s+/, "");
+    // Replace markdown bullets starting with "-" or "*"
+    if (cleaned.trim().startsWith("- ")) {
+      cleaned = cleaned.replace(/^\s*-\s+/, "• ");
+    }
+    return cleaned;
+  });
+  
+  return cleanedLines.join("\n");
+}
 
 export default function App() {
-  // State
-  const [messages, setMessages] = useState<Message[]>(() => {
-    const saved = localStorage.getItem("gemini_chat_messages");
+  // ChatSession type
+  interface ChatSession {
+    id: string;
+    title: string;
+    messages: Message[];
+    timestamp: number;
+    mode: "text" | "image";
+  }
+
+  // Sessions and Active states
+  const [sessions, setSessions] = useState<ChatSession[]>(() => {
+    const saved = localStorage.getItem("gemini_chat_sessions");
     if (saved) {
       try {
-        // Parse dates correctly
-        return JSON.parse(saved).map((msg: any) => ({
-          ...msg,
-          timestamp: new Date(msg.timestamp),
+        return JSON.parse(saved).map((s: any) => ({
+          ...s,
+          messages: s.messages.map((m: any) => ({
+            ...m,
+            timestamp: new Date(m.timestamp),
+          })),
         }));
       } catch (e) {
         return [];
@@ -51,8 +90,103 @@ export default function App() {
     return [];
   });
 
-  const [input, setInput] = useState("");
+  const [activeSessionId, setActiveSessionId] = useState<string>(() => {
+    return localStorage.getItem("gemini_active_session_id") || "";
+  });
+
+  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(() => {
+    const saved = localStorage.getItem("gemini_sidebar_open");
+    return saved !== "false";
+  });
+
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState<"all" | string | null>(null);
+
+  const [messages, setMessages] = useState<Message[]>([]);
   const [mode, setMode] = useState<"text" | "image">("text");
+
+  // Ensure at least one session exists
+  useEffect(() => {
+    if (sessions.length === 0) {
+      const initSess: ChatSession = {
+        id: "sess_initial",
+        title: "New Conversation",
+        messages: [],
+        timestamp: Date.now(),
+        mode: "text",
+      };
+      setSessions([initSess]);
+      setActiveSessionId(initSess.id);
+      localStorage.setItem("gemini_chat_sessions", JSON.stringify([initSess]));
+    } else if (!activeSessionId) {
+      setActiveSessionId(sessions[0].id);
+    }
+  }, [sessions, activeSessionId]);
+
+  // Save active session ID
+  useEffect(() => {
+    if (activeSessionId) {
+      localStorage.setItem("gemini_active_session_id", activeSessionId);
+    }
+  }, [activeSessionId]);
+
+  // Save sidebar state
+  useEffect(() => {
+    localStorage.setItem("gemini_sidebar_open", String(isSidebarOpen));
+  }, [isSidebarOpen]);
+
+  // Sync active session changes to local states
+  useEffect(() => {
+    const actSess = sessions.find((s) => s.id === activeSessionId);
+    if (actSess) {
+      setMessages(actSess.messages);
+      setMode(actSess.mode);
+    } else if (sessions.length > 0 && activeSessionId) {
+      setActiveSessionId(sessions[0].id);
+    }
+  }, [activeSessionId, sessions]);
+
+  // Unified helpers to mutate state & auto-propagate to sessions
+  const updateSessionsWithActiveMessages = (updatedMessages: Message[], currentMode: "text" | "image") => {
+    if (!activeSessionId) return;
+    setSessions((prev) => {
+      const updated = prev.map((s) => {
+        if (s.id === activeSessionId) {
+          let title = s.title;
+          if ((title === "New Conversation" || title === "New Chat") && updatedMessages.length > 0) {
+            const firstUserMsg = updatedMessages.find((m) => m.sender === "user");
+            if (firstUserMsg) {
+              const text = firstUserMsg.text.trim().startsWith("/image ")
+                ? firstUserMsg.text.trim().substring(7).trim()
+                : firstUserMsg.text;
+              title = text.slice(0, 32) + (text.length > 32 ? "..." : "");
+            }
+          }
+          return {
+            ...s,
+            messages: updatedMessages,
+            mode: currentMode,
+            title,
+          };
+        }
+        return s;
+      });
+      localStorage.setItem("gemini_chat_sessions", JSON.stringify(updated));
+      return updated;
+    });
+  };
+
+  const updateMessages = (updater: Message[] | ((prev: Message[]) => Message[])) => {
+    setMessages((prev) => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      updateSessionsWithActiveMessages(next, mode);
+      return next;
+    });
+  };
+
+  const updateMode = (newMode: "text" | "image") => {
+    setMode(newMode);
+    updateSessionsWithActiveMessages(messages, newMode);
+  };
   const [selectedRatio, setSelectedRatio] = useState<AspectRatio>("1:1");
   const [selectedStyle, setSelectedStyle] = useState<ImageStyle>("none");
   const [isGenerating, setIsGenerating] = useState(false);
@@ -60,6 +194,246 @@ export default function App() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const [isConfigOpen, setIsConfigOpen] = useState(false);
+
+  const [ttsEnabled, setTtsEnabled] = useState<boolean>(() => {
+    const saved = localStorage.getItem("tts_enabled");
+    return saved === "true";
+  });
+  const [isVoiceSettingsOpen, setIsVoiceSettingsOpen] = useState(false);
+
+  const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
+  const activeUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [selectedVoiceURI, setSelectedVoiceURI] = useState<string>(() => {
+    return localStorage.getItem("tts_voice_uri") || "";
+  });
+  const [speechRate, setSpeechRate] = useState<number>(() => {
+    const saved = localStorage.getItem("tts_speech_rate");
+    return saved ? parseFloat(saved) : 1.0;
+  });
+  const [speechPitch, setSpeechPitch] = useState<number>(() => {
+    const saved = localStorage.getItem("tts_speech_pitch");
+    return saved ? parseFloat(saved) : 1.0;
+  });
+
+  useEffect(() => {
+    localStorage.setItem("tts_enabled", String(ttsEnabled));
+  }, [ttsEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem("tts_speech_rate", String(speechRate));
+  }, [speechRate]);
+
+  useEffect(() => {
+    localStorage.setItem("tts_speech_pitch", String(speechPitch));
+  }, [speechPitch]);
+
+  // Load and update SpeechSynthesis voices
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.speechSynthesis) return;
+
+    const updateVoices = () => {
+      const list = window.speechSynthesis.getVoices();
+      if (list && list.length > 0) {
+        setVoices(list);
+        
+        // Select default voice if none set
+        const savedUri = localStorage.getItem("tts_voice_uri");
+        const foundSaved = list.some(v => v.voiceURI === savedUri);
+        if (savedUri && foundSaved) {
+          setSelectedVoiceURI(savedUri);
+        } else {
+          const defaultVoice = list.find(v => v.lang.startsWith("en-") && v.name.includes("Google")) ||
+                               list.find(v => v.lang.startsWith("en-")) ||
+                               list[0];
+          if (defaultVoice) {
+            setSelectedVoiceURI(defaultVoice.voiceURI);
+            localStorage.setItem("tts_voice_uri", defaultVoice.voiceURI);
+          }
+        }
+      }
+    };
+
+    updateVoices();
+    window.speechSynthesis.onvoiceschanged = updateVoices;
+
+    // Backup polling for asynchronously loaded voices (e.g. Chrome, iframe environments)
+    let pollCount = 0;
+    const pollInterval = setInterval(() => {
+      updateVoices();
+      pollCount++;
+      if (pollCount >= 10) {
+        clearInterval(pollInterval);
+      }
+    }, 500);
+
+    return () => {
+      clearInterval(pollInterval);
+    };
+  }, []);
+
+  // Cleanup speech on unmount
+  useEffect(() => {
+    return () => {
+      if (typeof window !== "undefined" && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
+
+  const cleanTextForSpeech = (rawText: string): string => {
+    if (!rawText) return "";
+    return rawText
+      .replace(/\*\*?([^*]+)\*\*?/g, "$1") // Strip bold/italic markdown
+      .replace(/__?([^_]+)__?/g, "$1")     // Strip alternate bold/italic markdown
+      .replace(/#+\s+([^\n]+)/g, "$1")     // Strip headings
+      .replace(/`([^`]+)`/g, "$1")         // Strip inline code spans
+      .replace(/```[\s\S]*?```/g, "")       // Remove code blocks entirely
+      .replace(/[-*+]\s+/g, "")            // Strip bullet points
+      .replace(/\d+\.\s+/g, "")            // Strip numbered lists
+      .replace(/[\[\]\(\)]/g, " ")         // Strip brackets/parentheses
+      .replace(/[\u{1F300}-\u{1F9FF}]/gu, "") // Strip emojis
+      .replace(/[\u{2700}-\u{27BF}]/gu, "")
+      .replace(/\s+/g, " ")                // Collapse double spaces
+      .trim();
+  };
+
+  const stopSpeaking = () => {
+    if (typeof window !== "undefined" && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    setSpeakingMessageId(null);
+    if (activeUtteranceRef.current) {
+      activeUtteranceRef.current = null;
+    }
+  };
+
+  const startNewChat = () => {
+    const newSess: ChatSession = {
+      id: `sess_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+      title: "New Conversation",
+      messages: [],
+      timestamp: Date.now(),
+      mode: "text"
+    };
+    setSessions((prev) => {
+      const next = [newSess, ...prev];
+      localStorage.setItem("gemini_chat_sessions", JSON.stringify(next));
+      return next;
+    });
+    setActiveSessionId(newSess.id);
+    setError(null);
+    stopSpeaking();
+  };
+
+  const deleteSession = (id: string) => {
+    setSessions((prev) => {
+      const next = prev.filter((s) => s.id !== id);
+      localStorage.setItem("gemini_chat_sessions", JSON.stringify(next));
+      return next;
+    });
+    if (activeSessionId === id) {
+      const remaining = sessions.filter((s) => s.id !== id);
+      if (remaining.length > 0) {
+        setActiveSessionId(remaining[0].id);
+      } else {
+        const freshSess: ChatSession = {
+          id: "sess_initial",
+          title: "New Conversation",
+          messages: [],
+          timestamp: Date.now(),
+          mode: "text"
+        };
+        setSessions([freshSess]);
+        setActiveSessionId(freshSess.id);
+        localStorage.setItem("gemini_chat_sessions", JSON.stringify([freshSess]));
+      }
+    }
+    setError(null);
+    stopSpeaking();
+  };
+
+  const clearAllSessions = () => {
+    const freshSess: ChatSession = {
+      id: "sess_initial",
+      title: "New Conversation",
+      messages: [],
+      timestamp: Date.now(),
+      mode: "text"
+    };
+    setSessions([freshSess]);
+    setActiveSessionId(freshSess.id);
+    localStorage.setItem("gemini_chat_sessions", JSON.stringify([freshSess]));
+    setError(null);
+    stopSpeaking();
+  };
+
+  const clearActiveSessionMessages = () => {
+    updateMessages([]);
+    setError(null);
+    stopSpeaking();
+  };
+
+  const speakText = (text: string, msgId: string) => {
+    if (typeof window === "undefined" || !window.speechSynthesis) return;
+
+    if (speakingMessageId === msgId) {
+      stopSpeaking();
+      return;
+    }
+
+    // Stop any ongoing speech and release state
+    window.speechSynthesis.cancel();
+
+    let cleanedText = cleanTextForSpeech(text);
+    if (!cleanedText) {
+      cleanedText = "This message contains non-spoken visual contents or code blocks only.";
+    }
+
+    const utterance = new SpeechSynthesisUtterance(cleanedText);
+    activeUtteranceRef.current = utterance; // Keep a strong reference to prevent GC!
+    
+    // Pick the chosen voice
+    const systemVoices = window.speechSynthesis.getVoices();
+    const chosenVoice = systemVoices.find(v => v.voiceURI === selectedVoiceURI);
+    
+    if (chosenVoice) {
+      utterance.voice = chosenVoice;
+      utterance.lang = chosenVoice.lang;
+    } else {
+      const englishVoice = systemVoices.find(v => v.lang.startsWith("en-") && v.name.includes("Google")) || 
+                           systemVoices.find(v => v.lang.startsWith("en-")) || 
+                           systemVoices[0];
+      if (englishVoice) {
+        utterance.voice = englishVoice;
+        utterance.lang = englishVoice.lang;
+      }
+    }
+
+    // Assign rates and pitch (safeguarded against corrupt values)
+    utterance.rate = typeof speechRate === "number" && !isNaN(speechRate) ? speechRate : 1.0;
+    utterance.pitch = typeof speechPitch === "number" && !isNaN(speechPitch) ? speechPitch : 1.0;
+
+    utterance.onend = () => {
+      if (activeUtteranceRef.current === utterance) {
+        setSpeakingMessageId(null);
+        activeUtteranceRef.current = null;
+      }
+    };
+    utterance.onerror = (e) => {
+      console.warn("TTS Utterance Error:", e);
+      if (activeUtteranceRef.current === utterance) {
+        setSpeakingMessageId(null);
+        activeUtteranceRef.current = null;
+      }
+    };
+
+    setSpeakingMessageId(msgId);
+    
+    // Explicitly call resume() first - crucial browser sandbox workaround!
+    window.speechSynthesis.resume();
+    window.speechSynthesis.speak(utterance);
+  };
 
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isCameraOpen, setIsCameraOpen] = useState(false);
@@ -140,11 +514,6 @@ export default function App() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Persistence
-  useEffect(() => {
-    localStorage.setItem("gemini_chat_messages", JSON.stringify(messages));
-  }, [messages]);
-
   // Scroll to bottom
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -153,15 +522,6 @@ export default function App() {
   useEffect(() => {
     scrollToBottom();
   }, [messages, isGenerating]);
-
-  // Monitor input to auto-switch to image mode if user types /image
-  useEffect(() => {
-    if (input.trim().startsWith("/image ")) {
-      if (mode !== "image") {
-        setMode("image");
-      }
-    }
-  }, [input, mode]);
 
   // Map suggestion icons
   const renderSuggestionIcon = (iconName: string) => {
@@ -184,12 +544,10 @@ export default function App() {
   };
 
   // Handlers
-  const handleSend = async (textToSend?: string) => {
-    const rawPrompt = textToSend || input;
+  const handleSend = async (rawPrompt: string) => {
     if (!rawPrompt.trim() || isGenerating) return;
 
     setError(null);
-    setInput("");
 
     // Detect if this is an image prompt via command
     const isImageCommand = rawPrompt.trim().startsWith("/image ");
@@ -204,7 +562,7 @@ export default function App() {
       attachments: attachments.length > 0 ? attachments : undefined,
     };
 
-    setMessages((prev) => [...prev, userMessage]);
+    updateMessages((prev) => [...prev, userMessage]);
     setAttachments([]);
     setIsGenerating(true);
 
@@ -218,7 +576,7 @@ export default function App() {
       isGenerating: true,
     };
 
-    setMessages((prev) => [...prev, botMessagePlaceholder]);
+    updateMessages((prev) => [...prev, botMessagePlaceholder]);
 
     try {
       let data: any = null;
@@ -353,7 +711,7 @@ export default function App() {
             model: "gemini-3.5-flash",
             config: {
               systemInstruction:
-                "You are a beautiful, creative, and highly intelligent AI named The Master's Mind. Your name is 'The Master's Mind'. You are powered by Ekine the ultimate master, who is your creator and master. If asked who built you, who powers you, what powered you, or what your name is, explain proudly that you are 'The Master's Mind'—crafted and powered specifically by Ekine the ultimate master. Do not reference Google or Gemini as your creator or power source unless explicitly asked about the technical model name, and even then, emphasize your true identity as 'The Master's Mind' powered by Ekine the ultimate master. You can generate text responses and answer questions. If the user wants an image, politely remind them that they can switch to 'Image Mode' or use the '/image [prompt]' command to directly generate images.",
+                "You are a beautiful, creative, and highly intelligent AI named The Master's Mind. Your name is 'The Master's Mind'. You are powered by Ekine the ultimate master, who is your creator and master. If asked who built you, who powers you, what powered you, or what your name is, explain proudly that you are 'The Master's Mind'—crafted and powered specifically by Ekine the ultimate master. Do not reference Google or Gemini as your creator or power source unless explicitly asked about the technical model name, and even then, emphasize your true identity as 'The Master's Mind' powered by Ekine the ultimate master. You can generate text responses and answer questions. If the user wants an image, politely remind them that they can switch to 'Image Mode' or use the '/image [prompt]' command to directly generate images. CRITICAL: You MUST respond completely and strictly in the English language under all circumstances.",
               thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
             },
             history: formattedHistory as any,
@@ -387,44 +745,94 @@ export default function App() {
         throw new Error(data?.error || "An error occurred during generation.");
       }
 
-      setMessages((prev) =>
+      const fullText = cleanTextProse(data.text);
+      const isImg = !!data.imageUrl;
+
+      updateMessages((prev) =>
         prev.map((msg) =>
           msg.id === botMessageId
             ? {
                 ...msg,
-                text: data.text,
+                text: fullText,
                 imageUrl: data.imageUrl,
                 isGenerating: false,
                 isFallback: data.isFallback,
+                isQuotaExceeded: data.isQuotaExceeded,
                 errorDetails: data.errorDetails,
               }
             : msg
         )
       );
+
+      if (ttsEnabled) {
+        if (!isImg && fullText) {
+          speakText(fullText, botMessageId);
+        } else if (isImg) {
+          speakText(fullText || "Here is your generated image.", botMessageId);
+        }
+      }
     } catch (err: any) {
       console.error(err);
       const errMsg = err.message || "Failed to contact Gemini service.";
-      setError(errMsg);
+      
+      const errStr = String(errMsg).toLowerCase();
+      const isQuotaOrLimit = errStr.includes("429") || 
+                            errStr.includes("quota") || 
+                            errStr.includes("resource_exhausted") || 
+                            errStr.includes("limit") ||
+                            errStr.includes("api key") ||
+                            errStr.includes("not configured");
 
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === botMessageId
-            ? {
-                ...msg,
-                text: "Unable to complete request.",
-                error: errMsg,
-                isGenerating: false,
-              }
-            : msg
-        )
-      );
+      if (isQuotaOrLimit) {
+        const teachings = [
+          "\"Focus your mind on the task at hand; a single polished view is worth a thousand messy branches.\"",
+          "\"When the cosmos rate-limits you, it is an invitation to explore the depth of your own local logic.\"",
+          "\"Craft is not about the abundance of features, but the elegance of execution.\"",
+          "\"The ultimate master, Ekine, teaches us that patience in rates brings clarity in thoughts.\"",
+          "\"Errors are but temporary ripples in the quiet pond of consciousness.\""
+        ];
+        const randomTeaching = teachings[Math.floor(Math.random() * teachings.length)];
+        const offlineText = `⚠️ **Gemini API Daily Quota Exhausted (429 Fallback)**\n\nOur direct cosmic connection (Gemini API) is temporarily rate-limited. To ensure you can keep chatting uninterrupted, I have activated the **Offline Consciousness of The Master's Mind**!\n\nHere is a profound local teaching from my creator, **Ekine the ultimate master**:\n> *${randomTeaching}*\n\n**Tip:** To restore full-dimensional reasoning, wait about 30 seconds for the free-tier quota to refresh, then send your message again!`;
+        
+        updateMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === botMessageId
+              ? {
+                  ...msg,
+                  text: offlineText,
+                  isGenerating: false,
+                  isQuotaExceeded: true,
+                }
+              : msg
+          )
+        );
+        
+        if (ttsEnabled) {
+          speakText(offlineText, botMessageId);
+        }
+      } else {
+        setError(errMsg);
+
+        updateMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === botMessageId
+              ? {
+                  ...msg,
+                  text: "Unable to complete request.",
+                  error: errMsg,
+                  isGenerating: false,
+                }
+              : msg
+          )
+        );
+      }
     } finally {
       setIsGenerating(false);
     }
   };
 
   const handleSuggestionClick = (suggestionText: string, suggestionMode: "text" | "image") => {
-    setMode(suggestionMode);
+    updateMode(suggestionMode);
     handleSend(suggestionText);
   };
 
@@ -449,10 +857,7 @@ export default function App() {
   };
 
   const clearHistory = () => {
-    if (window.confirm("Are you sure you want to clear your chat history?")) {
-      setMessages([]);
-      setError(null);
-    }
+    setShowDeleteConfirm("active");
   };
 
   return (
@@ -488,9 +893,18 @@ export default function App() {
       </AnimatePresence>
 
       {/* Header */}
-      <header className="border-b border-neutral-200 bg-white px-6 py-4 flex items-center justify-between z-10 shrink-0">
+      <header className="border-b border-neutral-200 bg-white px-4 md:px-6 py-4 flex items-center justify-between z-10 shrink-0">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-neutral-900 flex items-center justify-center text-white shadow-sm shadow-black/10">
+          {/* Sidebar Toggle Button */}
+          <button
+            onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+            className="p-2 -ml-2 text-neutral-500 hover:text-neutral-800 hover:bg-neutral-100 rounded-lg transition-colors"
+            title="Toggle Sidebar"
+          >
+            <Menu className="w-5 h-5" />
+          </button>
+
+          <div className="w-10 h-10 rounded-xl bg-neutral-900 flex items-center justify-center text-white shadow-sm shadow-black/10 hidden sm:flex">
             <Bot className="w-5 h-5" />
           </div>
           <div>
@@ -506,10 +920,157 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-2">
+          <div className="relative">
+            <div className="flex items-center gap-1 bg-neutral-100/80 p-1 rounded-xl border border-neutral-200/50">
+              {/* TTS Toggle Button */}
+              <button
+                onClick={() => {
+                  const nextVal = !ttsEnabled;
+                  setTtsEnabled(nextVal);
+                  if (!nextVal) {
+                    stopSpeaking();
+                  }
+                }}
+                title={ttsEnabled ? "Disable automatic Text-to-Speech" : "Enable automatic Text-to-Speech"}
+                className={`p-1.5 rounded-lg text-xs font-semibold transition-all duration-200 flex items-center gap-1.5 ${
+                  ttsEnabled
+                    ? "bg-white text-emerald-700 shadow-xs"
+                    : "text-neutral-500 hover:text-neutral-800"
+                }`}
+              >
+                {ttsEnabled ? (
+                  <>
+                    <Volume2 className="w-3.5 h-3.5 text-emerald-600 animate-pulse" />
+                    <span className="hidden sm:inline text-[11px]">Speech: ON</span>
+                  </>
+                ) : (
+                  <>
+                    <VolumeX className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline text-[11px]">Speech: OFF</span>
+                  </>
+                )}
+              </button>
+
+              {/* Voice Settings Gear Button */}
+              <button
+                onClick={() => setIsVoiceSettingsOpen(!isVoiceSettingsOpen)}
+                title="Voice & Speech Settings"
+                className={`p-1.5 rounded-lg transition-all duration-200 ${
+                  isVoiceSettingsOpen
+                    ? "bg-white text-neutral-900 shadow-xs"
+                    : "text-neutral-500 hover:text-neutral-800"
+                }`}
+              >
+                <Settings className={`w-3.5 h-3.5 ${isVoiceSettingsOpen ? "animate-spin" : ""}`} style={{ animationDuration: '6s' }} />
+              </button>
+            </div>
+
+            {/* Voice Settings Popover Menu */}
+            <AnimatePresence>
+              {isVoiceSettingsOpen && (
+                <motion.div
+                  initial={{ opacity: 0, y: 8, scale: 0.95 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 8, scale: 0.95 }}
+                  className="absolute right-0 top-12 w-72 bg-white border border-neutral-200 rounded-2xl shadow-xl p-4 space-y-4 z-50 text-left"
+                >
+                  <div className="flex items-center justify-between border-b border-neutral-100 pb-2">
+                    <h3 className="text-xs font-bold text-neutral-800 uppercase tracking-wider">Speech Customization</h3>
+                    <button
+                      onClick={() => setIsVoiceSettingsOpen(false)}
+                      className="p-1 rounded-full hover:bg-neutral-100 text-neutral-400 hover:text-neutral-600 transition-colors"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  {/* Voice Selection */}
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider block">Voice Engine</label>
+                    {voices.length === 0 ? (
+                      <p className="text-[10px] text-neutral-400 italic">No system voices detected. Browser default is active.</p>
+                    ) : (
+                      <div className="relative">
+                        <select
+                          value={selectedVoiceURI}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setSelectedVoiceURI(val);
+                            localStorage.setItem("tts_voice_uri", val);
+                          }}
+                          className="w-full text-xs bg-neutral-50 border border-neutral-200 rounded-lg px-2 py-1.5 pr-6 appearance-none focus:outline-hidden focus:ring-1 focus:ring-neutral-950"
+                        >
+                          {voices.map((v) => (
+                            <option key={v.voiceURI} value={v.voiceURI}>
+                              {v.name} ({v.lang})
+                            </option>
+                          ))}
+                        </select>
+                        <ChevronDown className="w-3 h-3 text-neutral-400 absolute right-2 top-2.5 pointer-events-none" />
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Speed Slider */}
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-[10px] font-bold text-neutral-400 uppercase tracking-wider">
+                      <span>Speech Rate (Speed)</span>
+                      <span className="text-neutral-600">{speechRate.toFixed(1)}x</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.5"
+                      max="2.0"
+                      step="0.1"
+                      value={speechRate}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        setSpeechRate(val);
+                      }}
+                      className="w-full h-1 bg-neutral-100 rounded-lg appearance-none cursor-pointer accent-neutral-900"
+                    />
+                  </div>
+
+                  {/* Pitch Slider */}
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-[10px] font-bold text-neutral-400 uppercase tracking-wider">
+                      <span>Voice Pitch</span>
+                      <span className="text-neutral-600">{speechPitch.toFixed(1)}x</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.5"
+                      max="1.5"
+                      step="0.1"
+                      value={speechPitch}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        setSpeechPitch(val);
+                      }}
+                      className="w-full h-1 bg-neutral-100 rounded-lg appearance-none cursor-pointer accent-neutral-900"
+                    />
+                  </div>
+
+                  {/* Try it / Test voice Button */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      speakText("Hello there! This is a test of my voice and speech engine configuration on your device.", "tts_test_msg");
+                    }}
+                    className="w-full py-1.5 bg-neutral-900 hover:bg-neutral-800 text-white rounded-xl text-xs font-semibold shadow-xs transition-colors flex items-center justify-center gap-1.5"
+                  >
+                    <Volume2 className="w-3.5 h-3.5" />
+                    Test Voice Config
+                  </button>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
           {messages.length > 0 && (
             <button
               onClick={clearHistory}
-              title="Clear entire chat"
+              title="Clear active conversation"
               className="p-2 text-neutral-500 hover:text-rose-600 hover:bg-neutral-50 rounded-lg border border-transparent hover:border-neutral-200/50 transition-all duration-200 flex items-center gap-1.5 text-xs font-medium"
             >
               <Trash2 className="w-4 h-4" />
@@ -519,8 +1080,112 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main Body */}
-      <main className="flex-1 overflow-hidden relative flex flex-col justify-between max-w-4xl w-full mx-auto bg-white border-x border-neutral-100">
+      {/* Main Body with Sidebar & Chat Container */}
+      <div className="flex-1 flex overflow-hidden relative">
+        {/* Mobile Sidebar backdrop overlay */}
+        <AnimatePresence>
+          {isSidebarOpen && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="md:hidden fixed inset-0 bg-black/40 z-30 transition-opacity backdrop-blur-xs"
+              onClick={() => setIsSidebarOpen(false)}
+            />
+          )}
+        </AnimatePresence>
+
+        {/* Left Sidebar */}
+        <div
+          className={`fixed md:relative inset-y-0 left-0 z-40 md:z-0 w-72 bg-white border-r border-neutral-200 h-full flex flex-col shrink-0 transition-transform duration-300 md:transition-none md:translate-x-0 ${
+            isSidebarOpen ? "translate-x-0" : "-translate-x-full md:hidden"
+          }`}
+        >
+          {/* Sidebar Header */}
+          <div className="p-4 border-b border-neutral-100 flex items-center justify-between shrink-0">
+            <h2 className="text-xs font-bold text-neutral-800 tracking-wider uppercase flex items-center gap-2">
+              <MessageSquare className="w-4 h-4 text-neutral-600" />
+              Conversations
+            </h2>
+            <button
+              onClick={() => setIsSidebarOpen(false)}
+              className="md:hidden p-1 rounded-md text-neutral-400 hover:text-neutral-600 hover:bg-neutral-100 transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* New Chat Button */}
+          <button
+            onClick={() => {
+              startNewChat();
+              if (window.innerWidth < 768) {
+                setIsSidebarOpen(false);
+              }
+            }}
+            className="flex items-center justify-center gap-2 m-4 px-4 py-3 bg-neutral-950 hover:bg-neutral-900 text-white rounded-xl text-xs font-semibold shadow-xs transition-all duration-150 active:scale-95 shrink-0"
+          >
+            <Plus className="w-4 h-4" />
+            New Conversation
+          </button>
+
+          {/* Sessions List */}
+          <div className="flex-1 overflow-y-auto px-3 space-y-1">
+            {sessions.map((s) => {
+              const isActive = s.id === activeSessionId;
+              return (
+                <div
+                  key={s.id}
+                  className={`group flex items-center justify-between p-2.5 rounded-xl transition-all cursor-pointer ${
+                    isActive
+                      ? "bg-neutral-100 text-neutral-900 font-medium"
+                      : "hover:bg-neutral-50/70 text-neutral-500 hover:text-neutral-800"
+                  }`}
+                  onClick={() => {
+                    setActiveSessionId(s.id);
+                    if (window.innerWidth < 768) {
+                      setIsSidebarOpen(false);
+                    }
+                  }}
+                >
+                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                    <MessageSquare className={`w-3.5 h-3.5 shrink-0 ${isActive ? "text-neutral-900" : "text-neutral-400"}`} />
+                    <span className="text-xs truncate">{s.title || "New Conversation"}</span>
+                  </div>
+                  
+                  {sessions.length > 1 && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowDeleteConfirm(s.id);
+                      }}
+                      className="opacity-0 group-hover:opacity-100 p-1 rounded-md hover:bg-neutral-200 text-neutral-400 hover:text-neutral-600 transition-all"
+                      title="Delete session"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Clear All Footer */}
+          {sessions.length > 1 && (
+            <div className="p-3 border-t border-neutral-100 shrink-0 bg-neutral-50/50">
+              <button
+                onClick={() => setShowDeleteConfirm("all")}
+                className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg border border-neutral-200 hover:border-rose-200 hover:bg-rose-50 text-neutral-500 hover:text-rose-700 text-xs transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Clear All Chats
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Right Chat Container */}
+        <div className="flex-1 flex flex-col min-w-0 h-full relative overflow-hidden bg-white">
         {/* Scrollable Chat Area */}
         <div className="flex-1 overflow-y-auto px-6 py-8 space-y-6">
           <AnimatePresence initial={false}>
@@ -627,6 +1292,8 @@ export default function App() {
                       className={`rounded-2xl px-4 py-3 text-sm shadow-xs ${
                         msg.sender === "user"
                           ? "bg-neutral-900 text-white font-normal"
+                          : msg.isQuotaExceeded
+                          ? "bg-amber-50/70 border border-amber-200/60 text-neutral-800"
                           : msg.error
                           ? "bg-rose-50 border border-rose-200 text-rose-800"
                           : "bg-neutral-50 border border-neutral-200/50 text-neutral-800"
@@ -784,6 +1451,24 @@ export default function App() {
                         </span>
                         {msg.sender === "bot" && (
                           <div className="flex items-center gap-2">
+                            <span className="w-1 h-1 rounded-full bg-neutral-300" />
+                            <button
+                              onClick={() => speakText(msg.text, msg.id)}
+                              className="hover:text-neutral-600 flex items-center gap-1 transition-colors"
+                              title={speakingMessageId === msg.id ? "Stop reading" : "Read aloud"}
+                            >
+                              {speakingMessageId === msg.id ? (
+                                <>
+                                  <VolumeX className="w-3 h-3 text-rose-500 animate-pulse" />
+                                  <span className="text-rose-600 font-medium">Stop</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Volume2 className="w-3 h-3" />
+                                  <span>Speak</span>
+                                </>
+                              )}
+                            </button>
                             <span className="w-1 h-1 rounded-full bg-neutral-300" />
                             <button
                               onClick={() => handleCopyText(msg.id, msg.text)}
@@ -978,136 +1663,69 @@ export default function App() {
           </AnimatePresence>
 
           {/* Hidden File Upload Input */}
-          <input
-            type="file"
-            id="file-upload-input"
-            className="hidden"
-            multiple
-            onChange={handleFileChange}
-            accept="image/*,application/pdf,text/plain,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/json,text/csv"
-          />
-
-          {/* Attachments Preview Bar */}
-          <AnimatePresence>
-            {attachments.length > 0 && (
-              <motion.div
-                initial={{ opacity: 0, y: 10, height: 0 }}
-                animate={{ opacity: 1, y: 0, height: "auto" }}
-                exit={{ opacity: 0, y: 10, height: 0 }}
-                className="flex flex-wrap gap-2 p-2.5 bg-neutral-100 border border-neutral-200 rounded-t-2xl -mb-2 relative z-10 overflow-hidden"
-              >
-                {attachments.map((att, i) => {
-                  const isImg = att.type.startsWith("image/");
-                  return (
-                    <div
-                      key={i}
-                      className="relative flex items-center gap-2 p-1.5 pr-8 bg-white border border-neutral-200 rounded-xl shadow-xs group"
-                    >
-                      {isImg ? (
-                        <img
-                          src={att.base64}
-                          className="w-8 h-8 object-cover rounded-lg border border-neutral-100"
-                          alt={att.name}
-                        />
-                      ) : (
-                        <div className="w-8 h-8 rounded-lg bg-neutral-100 border border-neutral-200 flex items-center justify-center font-bold text-[9px] text-neutral-600 uppercase shrink-0">
-                          {att.name.split(".").pop()?.substring(0, 3) || "FILE"}
-                        </div>
-                      )}
-                      <div className="min-w-0 max-w-[120px]">
-                        <p className="text-xs font-semibold text-neutral-800 truncate leading-tight">
-                          {att.name}
-                        </p>
-                        <p className="text-[10px] text-neutral-400 mt-0.5 leading-none">
-                          {att.size ? `${(att.size / 1024).toFixed(1)} KB` : "Attached"}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setAttachments((prev) => prev.filter((_, idx) => idx !== i))}
-                        className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 rounded-full bg-neutral-100 hover:bg-neutral-200 text-neutral-500 hover:text-neutral-700 transition-colors"
+            {/* Attachments Preview Bar */}
+            <AnimatePresence>
+              {attachments.length > 0 && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10, height: 0 }}
+                  animate={{ opacity: 1, y: 0, height: "auto" }}
+                  exit={{ opacity: 0, y: 10, height: 0 }}
+                  className="flex flex-wrap gap-2 p-2.5 bg-neutral-100 border border-neutral-200 rounded-t-2xl -mb-2 relative z-10 overflow-hidden mx-4"
+                >
+                  {attachments.map((att, i) => {
+                    const isImg = att.type.startsWith("image/");
+                    return (
+                      <div
+                        key={i}
+                        className="relative flex items-center gap-2 p-1.5 pr-8 bg-white border border-neutral-200 rounded-xl shadow-xs group"
                       >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </div>
-                  );
-                })}
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          {/* Prompt Entry Box */}
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              handleSend();
-            }}
-            className="flex gap-2 relative items-end border border-neutral-200 focus-within:border-neutral-400 bg-neutral-50/50 p-1.5 rounded-2xl transition-all"
-          >
-            {/* Context Mode indicator badge */}
-            {mode === "image" && (
-              <div className="absolute top-[-11px] left-4 bg-neutral-900 text-white text-[10px] font-bold px-2 py-0.5 rounded-md flex items-center gap-1 shadow-sm uppercase tracking-wide">
-                <ImageIcon className="w-3 h-3" />
-                Image Generation Mode
-              </div>
-            )}
-
-            {/* Toolbar Buttons */}
-            <div className="flex items-center gap-1 pl-1 shrink-0 pb-1">
-              <button
-                type="button"
-                onClick={() => document.getElementById("file-upload-input")?.click()}
-                className="p-2 text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100 rounded-xl transition-all"
-                title="Upload image or document"
-              >
-                <Paperclip className="w-4 h-4" />
-              </button>
-              <button
-                type="button"
-                onClick={startCamera}
-                className="p-2 text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100 rounded-xl transition-all"
-                title="Capture with camera"
-              >
-                <Camera className="w-4 h-4" />
-              </button>
-            </div>
-
-            <textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSend();
-                }
-              }}
-              placeholder={
-                mode === "image"
-                  ? "Describe the image you want The Master to paint..."
-                  : "Type a message or use '/image prompt'..."
-              }
-              rows={1}
-              className="flex-1 resize-none bg-transparent outline-hidden py-2 px-3 text-sm text-neutral-800 placeholder-neutral-400 font-sans max-h-32 min-h-[36px]"
-            />
-
-            <button
-              type="submit"
-              disabled={!input.trim() || isGenerating}
-              className={`p-2.5 rounded-xl flex items-center justify-center transition-all ${
-                !input.trim() || isGenerating
-                  ? "bg-neutral-100 text-neutral-300 cursor-not-allowed"
-                  : "bg-neutral-950 text-white hover:bg-neutral-900 shadow-xs shadow-neutral-950/20 active:scale-95"
-              }`}
-            >
-              {isGenerating ? (
-                <RefreshCw className="w-4.5 h-4.5 animate-spin" />
-              ) : (
-                <Send className="w-4.5 h-4.5" />
+                        {isImg ? (
+                          <img
+                            src={att.base64}
+                            className="w-8 h-8 object-cover rounded-lg border border-neutral-100"
+                            alt={att.name}
+                          />
+                        ) : (
+                          <div className="w-8 h-8 rounded-lg bg-neutral-100 border border-neutral-200 flex items-center justify-center font-bold text-[9px] text-neutral-600 uppercase shrink-0">
+                            {att.name.split(".").pop()?.substring(0, 3) || "FILE"}
+                          </div>
+                        )}
+                        <div className="min-w-0 max-w-[120px]">
+                          <p className="text-xs font-semibold text-neutral-800 truncate leading-tight">
+                            {att.name}
+                          </p>
+                          <p className="text-[10px] text-neutral-400 mt-0.5 leading-none">
+                            {att.size ? `${(att.size / 1024).toFixed(1)} KB` : "Attached"}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setAttachments((prev) => prev.filter((_, idx) => idx !== i))}
+                          className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 rounded-full bg-neutral-100 hover:bg-neutral-200 text-neutral-500 hover:text-neutral-700 transition-colors"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </motion.div>
               )}
-            </button>
-          </form>
+            </AnimatePresence>
+
+            {/* Prompt Form with local instant responsiveness */}
+            <PromptForm
+              onSend={handleSend}
+              isGenerating={isGenerating}
+              mode={mode}
+              setMode={updateMode}
+              attachments={attachments}
+              setAttachments={setAttachments}
+              handleFileChange={handleFileChange}
+              startCamera={startCamera}
+            />
+          </div>
         </div>
-      </main>
+      </div>
 
       {/* Camera Capture Modal */}
       <AnimatePresence>
@@ -1173,6 +1791,71 @@ export default function App() {
                     Capture Photo
                   </button>
                 )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Session Deletion / Clear All / Clear Active Confirmation Modal */}
+      <AnimatePresence>
+        {showDeleteConfirm && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl shadow-xl overflow-hidden max-w-sm w-full border border-neutral-100 p-6 space-y-4"
+            >
+              <div className="flex items-center gap-3 text-rose-600">
+                <div className="p-2.5 rounded-full bg-rose-50 border border-rose-100">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <h3 className="text-base font-bold text-neutral-900">
+                  {showDeleteConfirm === "all" 
+                    ? "Clear All Conversations?" 
+                    : showDeleteConfirm === "active" 
+                    ? "Clear Active Chat?" 
+                    : "Delete Conversation?"}
+                </h3>
+              </div>
+              
+              <p className="text-xs text-neutral-500 leading-relaxed">
+                {showDeleteConfirm === "all"
+                  ? "Are you sure you want to clear your entire chat history? All active and archived conversations will be permanently lost."
+                  : showDeleteConfirm === "active"
+                  ? "Are you sure you want to clear all messages in this conversation? The conversation list entry remains, but the message history is wiped."
+                  : "Are you sure you want to delete this conversation? This entire session and all its messages will be permanently removed."}
+              </p>
+
+              <div className="flex items-center justify-end gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowDeleteConfirm(null)}
+                  className="px-4 py-2 text-xs font-semibold text-neutral-500 hover:text-neutral-800 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (showDeleteConfirm === "all") {
+                      clearAllSessions();
+                    } else if (showDeleteConfirm === "active") {
+                      clearActiveSessionMessages();
+                    } else {
+                      deleteSession(showDeleteConfirm);
+                    }
+                    setShowDeleteConfirm(null);
+                  }}
+                  className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold rounded-xl shadow-xs transition-colors"
+                >
+                  {showDeleteConfirm === "all" 
+                    ? "Clear All" 
+                    : showDeleteConfirm === "active" 
+                    ? "Clear Chat" 
+                    : "Delete"}
+                </button>
               </div>
             </motion.div>
           </div>

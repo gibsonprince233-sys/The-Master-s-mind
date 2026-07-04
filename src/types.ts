@@ -15,6 +15,7 @@ export interface Message {
   isGenerating?: boolean;
   error?: string;
   isFallback?: boolean;
+  isQuotaExceeded?: boolean;
   errorDetails?: string;
   attachments?: Attachment[];
 }

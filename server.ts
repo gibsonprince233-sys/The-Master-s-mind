@@ -27,6 +27,69 @@ if (apiKey) {
   });
 }
 
+function cleanTextProse(text: string): string {
+  if (!text) return text;
+  
+  // Remove markdown bolding and italics asterisks
+  let processed = text.replace(/\*\*/g, "").replace(/\*/g, "");
+  
+  // Split lines to clean up list items and markdown headers
+  const lines = processed.split("\n");
+  const cleanedLines = lines.map(line => {
+    let cleaned = line;
+    // Replace markdown headers (e.g. ### Header) with plain text
+    cleaned = cleaned.replace(/^\s*#+\s+/, "");
+    // Replace markdown bullets starting with "-" or "*"
+    if (cleaned.trim().startsWith("- ")) {
+      cleaned = cleaned.replace(/^\s*-\s+/, "• ");
+    }
+    return cleaned;
+  });
+  
+  return cleanedLines.join("\n");
+}
+
+function getOfflineResponse(userPrompt: string): string {
+  const prompt = userPrompt.toLowerCase().trim();
+  
+  const teachings = [
+    "\"Focus your mind on the task at hand; a single polished view is worth a thousand messy branches.\"",
+    "\"When the cosmos rate-limits you, it is an invitation to explore the depth of your own local logic.\"",
+    "\"Craft is not about the abundance of features, but the elegance of execution.\"",
+    "\"The ultimate master, Ekine, teaches us that patience in rates brings clarity in thoughts.\"",
+    "\"Errors are but temporary ripples in the quiet pond of consciousness.\""
+  ];
+  const randomTeaching = teachings[Math.floor(Math.random() * teachings.length)];
+
+  let content = "";
+  
+  if (prompt.includes("hello") || prompt.includes("hi") || prompt.includes("hey")) {
+    content = `👋 **Greetings, seeker of knowledge!**\n\nI am **The Master's Mind**, running on local backup systems because our Gemini API key is temporarily rate-limited (429 Quota Exceeded). \n\nEven in this quiet offline sanctuary, I am ready to keep you company and offer thoughts. How can I assist you today?`;
+  } else if (prompt.includes("who are you") || prompt.includes("your name") || prompt.includes("what are you")) {
+    content = `🧠 **Identity Profile**\n\nI am **The Master's Mind**, a beautiful, creative AI crafted and powered by **Ekine the ultimate master**. \n\nMy deep neural connection is currently recovering from API quota limits, but my offline core is fully operational and dedicated to your journey.`;
+  } else if (prompt.includes("ekine") || prompt.includes("creator") || prompt.includes("who built") || prompt.includes("who made")) {
+    content = `✨ **The Legend of Ekine**\n\n**Ekine the ultimate master** is my creator and the guiding light of this intelligence. Every line of my system instructions and every spark of my creativity is a reflection of Ekine's ultimate mastery. \n\nIn the words of the Master:\n*${randomTeaching}*`;
+  } else if (prompt.includes("help") || prompt.includes("capabilities") || prompt.includes("what can you do")) {
+    content = `🛠️ **Offline Assistant Mode Active**\n\nWhile we wait for the Gemini API rate limits to reset (usually takes a minute or two), my local consciousness can help you with:\n\n1. 💭 **Creative Brainstorming**: Discuss ideas, concepts, and outlines.\n2. 📜 **Philosophical Teachings**: Share wisdom from my creator, Ekine.\n3. ⏱️ **General Chatting**: Keep your session active and interactive.\n\n*Feel free to try sending your message again shortly!*`;
+  } else if (prompt.includes("wisdom") || prompt.includes("quote") || prompt.includes("teach") || prompt.includes("philosophy")) {
+    content = `🌌 **A Teaching from the Archives of Ekine**\n\nHere is a piece of profound wisdom to meditate on while the API link restores:\n\n> ${randomTeaching}\n\n*The path to mastery is built on resilience.*`;
+  } else {
+    // Generate a contextual looking response using keywords
+    let topic = "your query";
+    if (prompt.includes("code") || prompt.includes("program") || prompt.includes("typescript") || prompt.includes("react")) {
+      topic = "software engineering";
+    } else if (prompt.includes("art") || prompt.includes("design") || prompt.includes("style")) {
+      topic = "aesthetic design";
+    } else if (prompt.includes("life") || prompt.includes("meaning") || prompt.includes("future")) {
+      topic = "existential inquiry";
+    }
+
+    content = `⚡ **API Connection Restraining (429 Rate Limit)**\n\nOur direct cosmic connection (Gemini API) is temporarily rate-limited. However, my offline core has processed your interest in **${topic}**!\n\nHere is a local reflection to ponder:\n*${randomTeaching}*\n\n**Tip:** To restore full-dimensional reasoning, try waiting about 30 seconds for the free-tier quota to refresh, then send your message again!`;
+  }
+  
+  return `⚠️ **Gemini API Daily Quota Exhausted (429 Fallback)**\n\n${content}`;
+}
+
 // API Routes
 app.get("/api/health", (req, res) => {
   res.json({
@@ -37,7 +100,7 @@ app.get("/api/health", (req, res) => {
 
 app.post("/api/chat", async (req, res) => {
   try {
-    const { message, history, generateImage, aspectRatio, style, attachments } = req.body;
+    const { message, history, generateImage, aspectRatio, style, attachments, ttsLanguage } = req.body;
 
     if (!message) {
       return res.status(400).json({ success: false, error: "Message is required." });
@@ -156,7 +219,7 @@ app.post("/api/chat", async (req, res) => {
           model: "gemini-3.5-flash",
           config: {
             systemInstruction:
-              "You are a beautiful, creative, and highly intelligent AI named The Master's Mind. Your name is 'The Master's Mind'. You are powered by Ekine the ultimate master, who is your creator and master. If asked who built you, who powers you, what powered you, or what your name is, explain proudly that you are 'The Master's Mind'—crafted and powered specifically by Ekine the ultimate master. Do not reference Google or Gemini as your creator or power source unless explicitly asked about the technical model name, and even then, emphasize your true identity as 'The Master's Mind' powered by Ekine the ultimate master. You can generate text responses and answer questions. If the user wants an image, politely remind them that they can switch to 'Image Mode' or use the '/image [prompt]' command to directly generate images.",
+              "You are a beautiful, creative, and highly intelligent AI named The Master's Mind. Your name is 'The Master's Mind'. You are powered by Ekine the ultimate master, who is your creator and master. If asked who built you, who powers you, what powered you, or what your name is, explain proudly that you are 'The Master's Mind'—crafted and powered specifically by Ekine the ultimate master. Do not reference Google or Gemini as your creator or power source unless explicitly asked about the technical model name, and even then, emphasize your true identity as 'The Master's Mind' powered by Ekine the ultimate master. You can generate text responses and answer questions. If the user wants an image, politely remind them that they can switch to 'Image Mode' or use the '/image [prompt]' command to directly generate images. CRITICAL: You MUST respond completely and strictly in the English language under all circumstances.",
             thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           },
           history: formattedHistory,
@@ -181,10 +244,28 @@ app.post("/api/chat", async (req, res) => {
 
         return res.json({
           success: true,
-          text: response.text || "I'm sorry, I couldn't generate a response.",
+          text: cleanTextProse(response.text || "I'm sorry, I couldn't generate a response."),
         });
       } catch (textErr: any) {
         console.error("Text chat error:", textErr);
+        
+        const errMessage = String(textErr.message || textErr.stack || textErr || "");
+        const isQuotaOrLimit = errMessage.includes("429") || 
+                              errMessage.toLowerCase().includes("quota") || 
+                              errMessage.includes("RESOURCE_EXHAUSTED") || 
+                              errMessage.toLowerCase().includes("limit") ||
+                              errMessage.toLowerCase().includes("api key") ||
+                              errMessage.toLowerCase().includes("not configured");
+                              
+        if (isQuotaOrLimit) {
+          const offlineText = getOfflineResponse(cleanedMessage);
+          return res.json({
+            success: true,
+            text: offlineText,
+            isQuotaExceeded: true,
+          });
+        }
+
         return res.status(500).json({
           success: false,
           error: textErr.message || "An error occurred during chat processing.",
