@@ -1,0 +1,6 @@
+{
+  "name": "The Master's Mind",
+  "description": "An elegant, interactive AI chatbot that generates both text responses and high-quality images.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
