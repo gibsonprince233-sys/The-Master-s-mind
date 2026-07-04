@@ -1,3 +1,10 @@
+export interface Attachment {
+  name: string;
+  type: string; // mimeType
+  base64: string; // full base64 data URI or just base64 string
+  size?: number;
+}
+
 export interface Message {
   id: string;
   sender: "user" | "bot";
@@ -9,6 +16,7 @@ export interface Message {
   error?: string;
   isFallback?: boolean;
   errorDetails?: string;
+  attachments?: Attachment[];
 }
 
 export type AspectRatio = "1:1" | "16:9" | "9:16" | "4:3" | "3:4";

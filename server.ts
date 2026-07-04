@@ -1,7 +1,7 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -37,7 +37,7 @@ app.get("/api/health", (req, res) => {
 
 app.post("/api/chat", async (req, res) => {
   try {
-    const { message, history, generateImage, aspectRatio, style } = req.body;
+    const { message, history, generateImage, aspectRatio, style, attachments } = req.body;
 
     if (!message) {
       return res.status(400).json({ success: false, error: "Message is required." });
@@ -131,11 +131,23 @@ app.post("/api/chat", async (req, res) => {
       // Standard Text Chat using gemini-3.5-flash
       console.log(`Generating text response for: "${cleanedMessage}"`);
 
-      // Map history to Gemini content structure
+      // Map history to Gemini content structure including any previous attachments
       const formattedHistory = (history || []).map((msg: any) => {
+        const parts: any[] = [{ text: msg.text }];
+        if (msg.attachments && msg.attachments.length > 0) {
+          msg.attachments.forEach((att: any) => {
+            const cleanBase64 = att.base64.split(",")[1] || att.base64;
+            parts.push({
+              inlineData: {
+                mimeType: att.type,
+                data: cleanBase64,
+              },
+            });
+          });
+        }
         return {
           role: msg.sender === "user" ? "user" : "model",
-          parts: [{ text: msg.text }],
+          parts: parts,
         };
       });
 
@@ -144,13 +156,27 @@ app.post("/api/chat", async (req, res) => {
           model: "gemini-3.5-flash",
           config: {
             systemInstruction:
-              "You are a helpful, creative and beautiful AI Chatbot. You can generate text responses and answer questions. If the user wants an image, politely remind them that they can switch to 'Image Mode' or use the '/image [prompt]' command to directly generate images.",
+              "You are a helpful, creative and beautiful AI Chatbot named The Master's Mind. You can generate text responses and answer questions. If the user wants an image, politely remind them that they can switch to 'Image Mode' or use the '/image [prompt]' command to directly generate images.",
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           },
           history: formattedHistory,
         });
 
+        const inlineParts = (attachments || []).map((att: any) => {
+          const cleanBase64 = att.base64.split(",")[1] || att.base64;
+          return {
+            inlineData: {
+              mimeType: att.type,
+              data: cleanBase64,
+            },
+          };
+        });
+
         const response = await chat.sendMessage({
-          message: cleanedMessage,
+          message: [
+            { text: cleanedMessage },
+            ...inlineParts,
+          ],
         });
 
         return res.json({

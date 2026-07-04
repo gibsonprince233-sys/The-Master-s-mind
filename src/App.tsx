@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, ChangeEvent } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 import {
   Send,
   Image as ImageIcon,
@@ -25,8 +25,12 @@ import {
   Home,
   Compass,
   Sliders,
+  Paperclip,
+  Camera,
+  FileText,
+  File,
 } from "lucide-react";
-import { Message, AspectRatio, ImageStyle } from "./types";
+import { Message, AspectRatio, ImageStyle, Attachment } from "./types";
 import { ASPECT_RATIOS, STYLE_OPTIONS, TEXT_SUGGESTIONS, IMAGE_SUGGESTIONS } from "./data";
 
 export default function App() {
@@ -56,6 +60,83 @@ export default function App() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const [isConfigOpen, setIsConfigOpen] = useState(false);
+
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [isCameraOpen, setIsCameraOpen] = useState(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+
+  const startCamera = async () => {
+    setCameraError(null);
+    setIsCameraOpen(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "user" },
+        audio: false
+      });
+      setCameraStream(stream);
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
+      }, 100);
+    } catch (err: any) {
+      console.error("Camera access error:", err);
+      setCameraError("Could not access camera. Please check permissions.");
+    }
+  };
+
+  const stopCamera = () => {
+    if (cameraStream) {
+      cameraStream.getTracks().forEach((track) => track.stop());
+      setCameraStream(null);
+    }
+    setIsCameraOpen(false);
+    setCameraError(null);
+  };
+
+  const capturePhoto = () => {
+    if (videoRef.current) {
+      const video = videoRef.current;
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const dataUrl = canvas.toDataURL("image/jpeg");
+        const newAttachment: Attachment = {
+          name: `camera_${Date.now()}.jpg`,
+          type: "image/jpeg",
+          base64: dataUrl,
+          size: Math.round((dataUrl.length * 3) / 4),
+        };
+        setAttachments((prev) => [...prev, newAttachment]);
+        stopCamera();
+      }
+    }
+  };
+
+  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+    Array.from(files).forEach((file: File) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const base64 = reader.result as string;
+        const newAttachment: Attachment = {
+          name: file.name,
+          type: file.type || "application/octet-stream",
+          base64,
+          size: file.size,
+        };
+        setAttachments((prev) => [...prev, newAttachment]);
+      };
+      reader.readAsDataURL(file);
+    });
+    e.target.value = "";
+  };
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -120,9 +201,11 @@ export default function App() {
       text: rawPrompt,
       timestamp: new Date(),
       mode: currentMsgMode,
+      attachments: attachments.length > 0 ? attachments : undefined,
     };
 
     setMessages((prev) => [...prev, userMessage]);
+    setAttachments([]);
     setIsGenerating(true);
 
     const botMessageId = crypto.randomUUID();
@@ -149,10 +232,11 @@ export default function App() {
           },
           body: JSON.stringify({
             message: rawPrompt,
-            history: messages.slice(-10), // Send last 10 messages for conversation context
+            history: messages.slice(-6), // Send last 6 messages for faster conversation context
             generateImage: currentMsgMode === "image",
             aspectRatio: selectedRatio,
             style: selectedStyle,
+            attachments: userMessage.attachments,
           }),
         });
 
@@ -246,22 +330,50 @@ export default function App() {
           }
         } else {
           // Text generation
-          const formattedHistory = messages.slice(-10).map((msg) => ({
-            role: msg.sender === "user" ? "user" : "model",
-            parts: [{ text: msg.text }],
-          }));
+          const formattedHistory = messages.slice(-6).map((msg) => {
+            const parts: any[] = [{ text: msg.text }];
+            if (msg.attachments && msg.attachments.length > 0) {
+              msg.attachments.forEach((att) => {
+                const cleanBase64 = att.base64.split(",")[1] || att.base64;
+                parts.push({
+                  inlineData: {
+                    mimeType: att.type,
+                    data: cleanBase64,
+                  },
+                });
+              });
+            }
+            return {
+              role: msg.sender === "user" ? "user" : "model",
+              parts: parts as any,
+            };
+          });
 
           const chat = ai.chats.create({
             model: "gemini-3.5-flash",
             config: {
               systemInstruction:
                 "You are a helpful, creative and beautiful AI Chatbot named The Master's Mind. You can generate text responses and answer questions. If the user wants an image, politely remind them that they can switch to 'Image Mode' or use the '/image [prompt]' command to directly generate images.",
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
             },
             history: formattedHistory as any,
           });
 
+          const inlineParts = (userMessage.attachments || []).map((att) => {
+            const cleanBase64 = att.base64.split(",")[1] || att.base64;
+            return {
+              inlineData: {
+                mimeType: att.type,
+                data: cleanBase64,
+              },
+            };
+          });
+
           const response = await chat.sendMessage({
-            message: cleanedMessage,
+            message: [
+              { text: cleanedMessage },
+              ...inlineParts,
+            ] as any,
           });
 
           data = {
@@ -522,10 +634,42 @@ export default function App() {
                     >
                       {/* Generating Loading State */}
                       {msg.isGenerating ? (
-                        <div className="flex items-center gap-3 py-1 text-neutral-500">
-                          <RefreshCw className="w-4 h-4 animate-spin text-neutral-400" />
-                          <span className="text-xs font-medium">
-                            {msg.mode === "image" ? "Gemini is painting your canvas..." : "Gemini is crafting response..."}
+                        <div className="flex items-center gap-3.5 py-1 text-neutral-500">
+                          {/* Bobble Thinking Animation */}
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <motion.span
+                              className="w-2 h-2 rounded-full bg-neutral-400"
+                              animate={{ y: [0, -4, 0] }}
+                              transition={{
+                                duration: 0.6,
+                                repeat: Infinity,
+                                ease: "easeInOut",
+                                delay: 0,
+                              }}
+                            />
+                            <motion.span
+                              className="w-2 h-2 rounded-full bg-neutral-400"
+                              animate={{ y: [0, -4, 0] }}
+                              transition={{
+                                duration: 0.6,
+                                repeat: Infinity,
+                                ease: "easeInOut",
+                                delay: 0.15,
+                              }}
+                            />
+                            <motion.span
+                              className="w-2 h-2 rounded-full bg-neutral-400"
+                              animate={{ y: [0, -4, 0] }}
+                              transition={{
+                                duration: 0.6,
+                                repeat: Infinity,
+                                ease: "easeInOut",
+                                delay: 0.3,
+                              }}
+                            />
+                          </div>
+                          <span className="text-xs font-medium tracking-wide">
+                            {msg.mode === "image" ? "The Master is painting your canvas..." : "The Master is crafting response..."}
                           </span>
                         </div>
                       ) : msg.error ? (
@@ -538,6 +682,49 @@ export default function App() {
                         </div>
                       ) : (
                         <div className="space-y-3">
+                          {/* Attachments rendering */}
+                          {msg.attachments && msg.attachments.length > 0 && (
+                            <div className={`flex flex-wrap gap-2 mt-1 mb-2 max-w-full ${msg.sender === "user" ? "justify-end" : "justify-start"}`}>
+                              {msg.attachments.map((att, i) => {
+                                const isImg = att.type.startsWith("image/");
+                                return (
+                                  <div
+                                    key={i}
+                                    className={`flex items-center gap-2.5 p-2 rounded-xl border max-w-[240px] text-left transition-all ${
+                                      msg.sender === "user"
+                                        ? "bg-white/10 border-white/10 hover:bg-white/15 text-white"
+                                        : "bg-neutral-100 border-neutral-200/50 hover:bg-neutral-200 text-neutral-850"
+                                    }`}
+                                  >
+                                    {isImg ? (
+                                      <img
+                                        src={att.base64}
+                                        className="w-11 h-11 object-cover rounded-lg shrink-0 border border-neutral-300"
+                                        alt={att.name}
+                                        onClick={() => setLightboxImage(att.base64)}
+                                        style={{ cursor: "pointer" }}
+                                      />
+                                    ) : (
+                                      <div className={`w-11 h-11 rounded-lg flex items-center justify-center font-bold text-[10px] uppercase shrink-0 ${
+                                        msg.sender === "user" ? "bg-neutral-800 text-neutral-200" : "bg-neutral-200 text-neutral-700"
+                                      }`}>
+                                        {att.name.split('.').pop()?.substring(0, 4) || "FILE"}
+                                      </div>
+                                    )}
+                                    <div className="min-w-0 flex-1">
+                                      <p className="text-xs font-semibold truncate leading-tight">
+                                        {att.name}
+                                      </p>
+                                      <p className="text-[10px] opacity-70 mt-0.5 leading-none">
+                                        {att.size ? `${(att.size / 1024).toFixed(1)} KB` : att.type}
+                                      </p>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+
                           {/* Text response */}
                           <div className="whitespace-pre-wrap leading-relaxed">
                             {msg.text}
@@ -790,6 +977,65 @@ export default function App() {
             )}
           </AnimatePresence>
 
+          {/* Hidden File Upload Input */}
+          <input
+            type="file"
+            id="file-upload-input"
+            className="hidden"
+            multiple
+            onChange={handleFileChange}
+            accept="image/*,application/pdf,text/plain,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/json,text/csv"
+          />
+
+          {/* Attachments Preview Bar */}
+          <AnimatePresence>
+            {attachments.length > 0 && (
+              <motion.div
+                initial={{ opacity: 0, y: 10, height: 0 }}
+                animate={{ opacity: 1, y: 0, height: "auto" }}
+                exit={{ opacity: 0, y: 10, height: 0 }}
+                className="flex flex-wrap gap-2 p-2.5 bg-neutral-100 border border-neutral-200 rounded-t-2xl -mb-2 relative z-10 overflow-hidden"
+              >
+                {attachments.map((att, i) => {
+                  const isImg = att.type.startsWith("image/");
+                  return (
+                    <div
+                      key={i}
+                      className="relative flex items-center gap-2 p-1.5 pr-8 bg-white border border-neutral-200 rounded-xl shadow-xs group"
+                    >
+                      {isImg ? (
+                        <img
+                          src={att.base64}
+                          className="w-8 h-8 object-cover rounded-lg border border-neutral-100"
+                          alt={att.name}
+                        />
+                      ) : (
+                        <div className="w-8 h-8 rounded-lg bg-neutral-100 border border-neutral-200 flex items-center justify-center font-bold text-[9px] text-neutral-600 uppercase shrink-0">
+                          {att.name.split(".").pop()?.substring(0, 3) || "FILE"}
+                        </div>
+                      )}
+                      <div className="min-w-0 max-w-[120px]">
+                        <p className="text-xs font-semibold text-neutral-800 truncate leading-tight">
+                          {att.name}
+                        </p>
+                        <p className="text-[10px] text-neutral-400 mt-0.5 leading-none">
+                          {att.size ? `${(att.size / 1024).toFixed(1)} KB` : "Attached"}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setAttachments((prev) => prev.filter((_, idx) => idx !== i))}
+                        className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 rounded-full bg-neutral-100 hover:bg-neutral-200 text-neutral-500 hover:text-neutral-700 transition-colors"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  );
+                })}
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           {/* Prompt Entry Box */}
           <form
             onSubmit={(e) => {
@@ -806,6 +1052,26 @@ export default function App() {
               </div>
             )}
 
+            {/* Toolbar Buttons */}
+            <div className="flex items-center gap-1 pl-1 shrink-0 pb-1">
+              <button
+                type="button"
+                onClick={() => document.getElementById("file-upload-input")?.click()}
+                className="p-2 text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100 rounded-xl transition-all"
+                title="Upload image or document"
+              >
+                <Paperclip className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={startCamera}
+                className="p-2 text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100 rounded-xl transition-all"
+                title="Capture with camera"
+              >
+                <Camera className="w-4 h-4" />
+              </button>
+            </div>
+
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -817,7 +1083,7 @@ export default function App() {
               }}
               placeholder={
                 mode === "image"
-                  ? "Describe the image you want Gemini to paint..."
+                  ? "Describe the image you want The Master to paint..."
                   : "Type a message or use '/image prompt'..."
               }
               rows={1}
@@ -842,6 +1108,76 @@ export default function App() {
           </form>
         </div>
       </main>
+
+      {/* Camera Capture Modal */}
+      <AnimatePresence>
+        {isCameraOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/65 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl shadow-xl overflow-hidden max-w-md w-full border border-neutral-100 animate-fadeIn"
+            >
+              <div className="p-4 border-b border-neutral-100 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Camera className="w-4 h-4 text-neutral-900" />
+                  <h3 className="text-sm font-semibold text-neutral-900">Take a Photo</h3>
+                </div>
+                <button
+                  onClick={stopCamera}
+                  type="button"
+                  className="p-1 rounded-full hover:bg-neutral-100 text-neutral-400 hover:text-neutral-600 transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="relative aspect-video bg-neutral-950 flex items-center justify-center overflow-hidden">
+                {cameraError ? (
+                  <div className="p-6 text-center text-neutral-400 space-y-2">
+                    <AlertCircle className="w-8 h-8 text-rose-500 mx-auto" />
+                    <p className="text-xs font-medium">{cameraError}</p>
+                    <button
+                      onClick={startCamera}
+                      type="button"
+                      className="px-3 py-1.5 bg-neutral-800 text-white rounded-lg text-xs hover:bg-neutral-700 transition-colors"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : (
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    playsInline
+                    className="w-full h-full object-cover scale-x-[-1]"
+                  />
+                )}
+              </div>
+
+              <div className="p-4 bg-neutral-50 border-t border-neutral-100 flex items-center justify-between">
+                <button
+                  onClick={stopCamera}
+                  type="button"
+                  className="px-4 py-2 text-xs font-semibold text-neutral-600 hover:text-neutral-800"
+                >
+                  Cancel
+                </button>
+                {!cameraError && (
+                  <button
+                    onClick={capturePhoto}
+                    type="button"
+                    className="px-4 py-2 bg-neutral-950 text-white hover:bg-neutral-900 text-xs font-semibold rounded-xl shadow-xs active:scale-95 transition-all"
+                  >
+                    Capture Photo
+                  </button>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
