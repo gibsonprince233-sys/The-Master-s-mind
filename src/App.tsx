@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
+import { GoogleGenAI } from "@google/genai";
 import {
   Send,
   Image as ImageIcon,
@@ -137,25 +138,141 @@ export default function App() {
     setMessages((prev) => [...prev, botMessagePlaceholder]);
 
     try {
-      // API call
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          message: rawPrompt,
-          history: messages.slice(-10), // Send last 10 messages for conversation context
-          generateImage: currentMsgMode === "image",
-          aspectRatio: selectedRatio,
-          style: selectedStyle,
-        }),
-      });
+      let data: any = null;
+      let isServiceAvailable = true;
 
-      const data = await response.json();
+      try {
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            message: rawPrompt,
+            history: messages.slice(-10), // Send last 10 messages for conversation context
+            generateImage: currentMsgMode === "image",
+            aspectRatio: selectedRatio,
+            style: selectedStyle,
+          }),
+        });
 
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || "An error occurred during generation.");
+        const contentType = response.headers.get("content-type");
+        if (response.ok && contentType && contentType.includes("application/json")) {
+          data = await response.json();
+        } else {
+          // If we got non-JSON (e.g. HTML from static hosts like Netlify), trigger fallback
+          isServiceAvailable = false;
+        }
+      } catch (fetchErr) {
+        // Network/connection errors also trigger fallback
+        isServiceAvailable = false;
+      }
+
+      // If Express backend is unreachable (e.g. static hosting on Netlify), run directly on client-side
+      if (!isServiceAvailable) {
+        const clientApiKey = (import.meta as any).env?.VITE_GEMINI_API_KEY;
+
+        if (!clientApiKey) {
+          throw new Error(
+            "API Service Unreachable (Static Host / Netlify detected). To run this chatbot on Netlify, please add your Gemini API key as an environment variable named 'VITE_GEMINI_API_KEY' in your Netlify dashboard and redeploy."
+          );
+        }
+
+        console.log("Static environment detected. Running Gemini AI directly in browser via client-side fallback...");
+        
+        const ai = new GoogleGenAI({ apiKey: clientApiKey });
+        const cleanedMessage = rawPrompt.trim().startsWith("/image ")
+          ? rawPrompt.trim().substring(7).trim()
+          : rawPrompt;
+
+        const shouldGenerateImage = currentMsgMode === "image" || rawPrompt.trim().startsWith("/image ");
+
+        if (shouldGenerateImage) {
+          let imagePrompt = cleanedMessage;
+          if (selectedStyle && selectedStyle !== "none") {
+            imagePrompt = `${cleanedMessage}, in ${selectedStyle} style`;
+          }
+
+          try {
+            const response = await ai.models.generateContent({
+              model: "gemini-3.1-flash-lite-image",
+              contents: {
+                parts: [{ text: imagePrompt }],
+              },
+              config: {
+                imageConfig: {
+                  aspectRatio: selectedRatio || "1:1",
+                },
+              },
+            });
+
+            let imageUrl = "";
+            let textResponse = "";
+
+            if (response.candidates?.[0]?.content?.parts) {
+              for (const part of response.candidates[0].content.parts) {
+                if (part.inlineData) {
+                  imageUrl = `data:image/png;base64,${part.inlineData.data}`;
+                } else if (part.text) {
+                  textResponse += part.text;
+                }
+              }
+            }
+
+            if (!imageUrl) {
+              throw new Error("No image data returned from model.");
+            }
+
+            data = {
+              success: true,
+              text: textResponse || `Here is your generated image for: "${cleanedMessage}"`,
+              imageUrl,
+              isFallback: false,
+            };
+          } catch (imageErr: any) {
+            console.warn("Client Gemini image generation quota limit. Activating Pollinations fallback.", imageErr);
+            const seed = Math.floor(Math.random() * 1000000);
+            const encodedPrompt = encodeURIComponent(imagePrompt);
+            const imageUrl = `https://image.pollinations.ai/p/${encodedPrompt}?width=1024&height=1024&nologo=true&seed=${seed}`;
+            const fallbackExplanation = `🎨 **Creative Fallback Activated**\n\nYour Gemini API key is on the Free Tier, which has a 0-quota limit on Google's proprietary Imagen models. To deliver a seamless experience, the system has activated our **Creative Fallback Engine** to render your requested scene:`;
+
+            data = {
+              success: true,
+              text: fallbackExplanation,
+              imageUrl,
+              isFallback: true,
+              errorDetails: imageErr.message || "Quota limit or model access restriction.",
+            };
+          }
+        } else {
+          // Text generation
+          const formattedHistory = messages.slice(-10).map((msg) => ({
+            role: msg.sender === "user" ? "user" : "model",
+            parts: [{ text: msg.text }],
+          }));
+
+          const chat = ai.chats.create({
+            model: "gemini-3.5-flash",
+            config: {
+              systemInstruction:
+                "You are a helpful, creative and beautiful AI Chatbot named The Master's Mind. You can generate text responses and answer questions. If the user wants an image, politely remind them that they can switch to 'Image Mode' or use the '/image [prompt]' command to directly generate images.",
+            },
+            history: formattedHistory as any,
+          });
+
+          const response = await chat.sendMessage({
+            message: cleanedMessage,
+          });
+
+          data = {
+            success: true,
+            text: response.text || "I'm sorry, I couldn't generate a response.",
+          };
+        }
+      }
+
+      if (!data || !data.success) {
+        throw new Error(data?.error || "An error occurred during generation.");
       }
 
       setMessages((prev) =>
